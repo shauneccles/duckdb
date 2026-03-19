@@ -217,7 +217,12 @@ unique_ptr<LogicalOperator> TopNWindowElimination::OptimizeInternal(unique_ptr<L
 	D_ASSERT(op->type != LogicalOperatorType::LOGICAL_UNNEST);
 
 	if (late_mat_lhs) {
-		op = ConstructJoin(std::move(late_mat_lhs), std::move(op), group_projection_idxs.size(), params);
+		// Deduplicate group columns to match CreateProjectionOperator
+		set<idx_t> unique_group_vals;
+		for (const auto &g : group_projection_idxs) {
+			unique_group_vals.insert(g.second);
+		}
+		op = ConstructJoin(std::move(late_mat_lhs), std::move(op), unique_group_vals.size(), params);
 	}
 
 	UpdateTopmostBindings(window_idx, op, group_projection_idxs, topmost_bindings, new_bindings, replacer);
@@ -659,6 +664,7 @@ vector<ColumnBinding> TopNWindowElimination::TraverseProjectionBindings(const st
 			auto &new_binding = new_bindings[i];
 			D_ASSERT(new_binding.table_index == projection.table_index);
 			VisitExpression(&projection.expressions[new_binding.column_index]);
+			D_ASSERT(column_references.size() == 1);
 			new_binding = column_references.begin()->first;
 			column_references.clear();
 		}
@@ -694,15 +700,16 @@ void TopNWindowElimination::UpdateTopmostBindings(const idx_t window_idx, const 
 	}
 
 	// Project the group columns
-	idx_t current_column_idx = 0;
-	for (auto group_idx : group_idxs) {
+	for (const auto &group_idx : group_idxs) {
 		const idx_t group_referencing_idx = group_idx.first;
 		new_bindings[group_referencing_idx].table_index = group_table_idx;
 		new_bindings[group_referencing_idx].column_index = group_val_to_proj_pos[group_idx.second];
 		replacer.replacement_bindings.emplace_back(topmost_bindings[group_referencing_idx],
 		                                           new_bindings[group_referencing_idx]);
-		current_column_idx++;
 	}
+
+	// Start after the deduplicated group columns in the projection output
+	idx_t current_column_idx = group_val_to_proj_pos.size();
 
 	if (group_table_idx != aggregate_table_idx) {
 		// If the topmost operator is an aggregate, the table indexes are different, and we start back from 0
